@@ -3,157 +3,161 @@
 
 #include "../inc/stm32f103xb.h"
 
-int seconds = 0;
+#include "i2c/i2c.h"
+#include "lcd/lcd.h"
 
-void sendStringToPcf(char *str, uint8_t len) {
-	I2C1->CR1 |= I2C_CR1_START;
-	while (!(I2C1->SR1 & I2C_SR1_SB));
-	I2C1->DR = (0x27 << 1);
-	while (!(I2C1->SR1 & I2C_SR1_ADDR_Msk));
-	I2C1->SR2;
+#define TRUE 1
+#define FALSE 0
 
-	uint8_t one, two;
-	for (uint8_t i = 0; i < len; i++) {
-		one = str[i] & 0xF;
-		two = str[i] & 0xF0;
+uint8_t i2c_k[4] = {'k' & 0xF0 | 0xD, 'k' & 0xF0 | 0x9, ('k' & 0xF) << 4 | 0xD, ('k' & 0xF) << 4 | 0x9};
 
-		// sending bytes
-		while(!(I2C1->SR1 & I2C_SR1_TXE_Msk));
-		I2C1->DR = two | 0xD;
-		while(!(I2C1->SR1 & I2C_SR1_TXE_Msk));
-		I2C1->DR = two | 0x9;
+const uint32_t fastDelay = 1e5;
+const uint32_t slowDelay = 1e6;
 
-		while(!(I2C1->SR1 & I2C_SR1_TXE_Msk));
-		I2C1->DR = one << 4 | 0xD;
+uint32_t temp0 = 0;
+uint32_t temp1 = 0;
 
-		while(!(I2C1->SR1 & I2C_SR1_TXE_Msk));
-		I2C1->DR = one << 4 | 0x9;
-	}
+uint32_t time = slowDelay;
 
-	while (!(I2C1->SR1 & I2C_SR1_BTF_Msk));
-	I2C1->CR1 |= I2C_CR1_STOP;
+char menu[2][16] = {
+	"Temp: \0",
+	"THT: \0",
+};
+
+void initRCC() {
+	RCC->CIR |= RCC_CIR_HSERDYIE;
+	RCC->CIR |= RCC_CIR_PLLRDYIE;
+
+	RCC->CR |= RCC_CR_HSEON;
+
+	NVIC_EnableIRQ(RCC_IRQn);
+
 }
 
-void changePos(uint8_t pos) {
-	I2C1->CR1 |= I2C_CR1_START;
-	while (!(I2C1->SR1 & I2C_SR1_SB));
-	I2C1->DR = (0x27 << 1);
-	while (!(I2C1->SR1 & I2C_SR1_ADDR_Msk));
-	I2C1->SR2;	
+void RCC_IRQHandler() {
+	if (RCC->CIR & RCC_CIR_HSERDYF) {
+		RCC->CIR |= RCC_CIR_HSERDYC;
+		// 8x3 = 24 MHz
+		RCC->CFGR |= RCC_CFGR_PLLMULL3;
+		RCC->CFGR |= RCC_CFGR_PLLSRC;
+		// ADC prescaler 24/2 = 12MHz (14 MAX)
+		RCC->CFGR |= RCC_CFGR_ADCPRE_DIV2;
 
-	if (pos == 1) {
-
-		while(!(I2C1->SR1 & I2C_SR1_TXE_Msk));
-		I2C1->DR = 0x80 | 0xC;
-		while(!(I2C1->SR1 & I2C_SR1_TXE_Msk));
-		I2C1->DR = 0x80 | 0x8;
-
-		while(!(I2C1->SR1 & I2C_SR1_TXE_Msk));
-		I2C1->DR = 0x0 | 0xC;
-		while(!(I2C1->SR1 & I2C_SR1_TXE_Msk));
-		I2C1->DR = 0x0 | 0x8;
-
-	} else { // line 2
-		while(!(I2C1->SR1 & I2C_SR1_TXE_Msk));
-		I2C1->DR = 0xC0 | 0xC;
-		while(!(I2C1->SR1 & I2C_SR1_TXE_Msk));
-		I2C1->DR = 0xC0 | 0x8;
-
-		while(!(I2C1->SR1 & I2C_SR1_TXE_Msk));
-		I2C1->DR = 0x00 | 0xC;
-		while(!(I2C1->SR1 & I2C_SR1_TXE_Msk));
-		I2C1->DR = 0x00 | 0x8;
+		RCC->CR |= RCC_CR_PLLON;
+	} else if (RCC->CIR & RCC_CIR_PLLRDYF) {
+		RCC->CFGR |= RCC_CFGR_SW_PLL;
+		RCC->CIR |= RCC_CIR_PLLRDYC;
 	}
-	while (!(I2C1->SR1 & I2C_SR1_BTF_Msk));
-	I2C1->CR1 |= I2C_CR1_STOP;
-
-	for (uint32_t i = 0; i < 10000; i++);
 }
 
-void ADCInit() {
-	// analog a1
-	GPIOA->CRL &= ~GPIO_CRL_MODE1_Msk;
-
-	// enable adc rcc
+void initADC() {
 	RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
-	
-	// on swstart
-	ADC1->CR2 |= ADC_CR2_EXTTRIG;
+    RCC->APB2ENR |= RCC_APB2ENR_IOPAEN;
 
-	// // single conversation mode
-	// ADC1->CR2 |= ADC_CR2_CONT;
-	// // use wstart
-	ADC1->CR2 |= ADC_CR2_EXTSEL;
+	GPIOB->CRL &= ~GPIO_CRL_MODE0;
+	GPIOB->CRL &= ~GPIO_CRL_CNF0;
 
-	// 1channel selected
-	// ADC1->CR1 |= 0x1;
+	GPIOB->CRL &= ~GPIO_CRL_MODE1;
+	GPIOB->CRL &= ~GPIO_CRL_CNF1;
 
-	ADC1->SQR3 |= 1;
+	ADC1->CR1 |= ADC_CR1_SCAN;
+	// enabel intrupt on end ADC convertion
+	ADC1->CR1 |= ADC_CR1_JEOCIE;
+	ADC1->CR2 |= ADC_CR2_JEXTTRIG;
+	// set 111 JSWSTART
+	ADC1->CR2 |= ADC_CR2_JEXTSEL; 
 
-	// on adc
+	// 2 conversation
+	ADC1->JSQR |= ADC_JSQR_JL_0;
+
+	ADC1->JSQR |= ADC_JSQR_JSQ4_0;
+
+	NVIC_EnableIRQ(ADC1_2_IRQn);
+
+	// on ADC
 	ADC1->CR2 |= ADC_CR2_ADON;
 
-	ADC1->CR2 |= ADC_CR2_RSTCAL;
-	while (ADC1->CR2 & ADC_CR2_RSTCAL);
+	// Сбрасываем калибровку
+    ADC1->CR2 |= ADC_CR2_RSTCAL;
+    while((ADC1->CR2 & ADC_CR2_RSTCAL) == ADC_CR2_RSTCAL);
+	
+    // Запускаем калибровку
+    ADC1->CR2 |= ADC_CR2_CAL;
+    while((ADC1->CR2 & ADC_CR2_CAL) != ADC_CR2_CAL);
+}
 
-	ADC1->CR2 |= ADC_CR2_CAL;
-	while (ADC1->CR2 & ADC_CR2_CAL);	
+void ADC1_2_IRQHandler() {
+	temp0 = ADC1->JDR1;
+	temp1 = ADC1->JDR2;
+	ADC1->SR &= ~ADC_SR_JEOC;
+}
+
+void delay() {
+	for (uint32_t i = 0; i < time; i++);
+}
+
+// Button RIGHT interrupt
+void EXTI15_10_IRQHandler() {
+	GPIOB->ODR ^= GPIO_ODR_ODR0;
+	EXTI->PR |= EXTI_PR_PR15;
+}
+
+void buttonSetup() {
+	// cloking B port
+	RCC->APB2ENR |= RCC_APB2ENR_IOPBEN;
+	RCC->APB2ENR |= RCC_APB2ENR_AFIOEN;
+
+	AFIO->EXTICR[3] |= AFIO_EXTICR4_EXTI15_PB;
+
+	// button B15 RIGHT
+	GPIOB->CRH &= ~GPIO_CRH_MODE15;
+	GPIOB->CRH &= ~GPIO_CRH_CNF15_0;
+	GPIOB->CRH |= GPIO_CRH_CNF15_1;
+
+	GPIOB->ODR |= GPIO_ODR_ODR15;
+
+	EXTI->FTSR |= EXTI_FTSR_TR15;
+	EXTI->IMR |= EXTI_IMR_MR15;
+
+	NVIC_EnableIRQ(EXTI15_10_IRQn);
+}
+
+void initLED() {
+	// cloking C port
+	RCC->APB2ENR |= RCC_APB2ENR_IOPBEN;
+
+	// LED C13
+	GPIOB->CRL &= ~GPIO_CRL_CNF0;
+
+	GPIOB->CRL &= ~GPIO_CRL_MODE0; 
+	GPIOB->CRL |= GPIO_CRL_MODE0; 
 }
 
 int main() {
+	delay(); // for display
+	initRCC();
+	while(!(RCC->CFGR & RCC_CFGR_SWS_PLL));
+	initLED();
+	// initADC();
+	I2Cinit();
+	LCDinit();
+	LCDclear();
+	delay();
+	LCDprint(menu[0], lineLength(menu[0]));
+	delay();
+	LCDchangeLine(1);
+	LCDprint(menu[1], lineLength(menu[1]));
+	buttonSetup();
 
-	RCC->APB2ENR |= RCC_APB2ENR_IOPAEN;
-	RCC->APB2ENR |= RCC_APB2ENR_IOPBEN;
-	RCC->APB2ENR |= RCC_APB2ENR_IOPCEN;
+	// start adc
+	// ADC1->CR2 |= ADC_CR2_JSWSTART;
 
-	// i2c pb6, pb7 alternative funcs open drain
-	GPIOB->CRL |= (0xFF << 24);
+	while (TRUE) {
 
-	// enable i2c
-	RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
-	seconds++;
-
-	I2C1->CR2 |= 8;
-	I2C1->TRISE |= 8 + 1;
-	I2C1->CCR |= 0x28;
-	// i2c enable
-	I2C1->CR1 |= I2C_CR1_PE;
-	printf("debug here");
-
-	I2C1->CR1 |= I2C_CR1_START;
-	while (!(I2C1->SR1 & I2C_SR1_SB));
-	I2C1->DR = (0x27 << 1);
-	while (!(I2C1->SR1 & I2C_SR1_ADDR_Msk));
-	
-	//reading SR2
-	I2C1->SR2;
-
-	// pcf settings array
-	uint8_t bytes1[16] = {0x3C, 0x38, 0x3C, 0x38, 0x3C, 0x38, 0x2C, 0x28, 0x2C, 0x28, 0x8C, 0x88, 0x0C, 0x08, 0xDC, 0xD8};
-	for (uint8_t i = 0; i < 16; i++) {
-		while(!(I2C1->SR1 & I2C_SR1_TXE_Msk));
-		I2C1->DR = bytes1[i];
-	}
-
-	while (!(I2C1->SR1 & I2C_SR1_BTF_Msk));
-	I2C1->CR1 |= I2C_CR1_STOP;
-
-	for (uint32_t i = 0; i < 10000; i++);
-
-	ADCInit();
-
-	while (1) {
-		for	(int i = 0; i < 200000; i++);
-		changePos(2);
-		// start conversation on ADC
-		ADC1->CR2 |= ADC_CR2_SWSTART;		
-		while (!(ADC1->SR & ADC_SR_EOC));
-		uint16_t data = ADC1->DR & ADC_DR_DATA_Msk;
-
-		char str[10];
-		sprintf(str, "DH %4d  \0", data);
-
-		sendStringToPcf(str, 7);
+		GPIOB->ODR |= GPIO_ODR_ODR0;
+		delay();
+		GPIOB->ODR &= ~GPIO_ODR_ODR0;
+ 		delay();
 	}
 
 	return 0;

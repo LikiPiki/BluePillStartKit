@@ -2,9 +2,17 @@
 
 ## Installing
 Installing dependencies. Also you need install VSCode.
+For Mac:
 ```
 brew install arm-none-eabi-gcc stlink
 ```
+
+For Linux (arch):
+```
+sudo pacman -S arm-none-eabi-gcc stlink arm-none-eabi-gdb
+```
+arm-none-eabi-gdb for debbuging
+
 Installing Vscode plugins
 - Cortex debug
 - ARM
@@ -14,14 +22,12 @@ Installing Vscode plugins
 
 ```
 make - make and flash stm32 blue pill
+make production - make without -gddb flag
 make flash - flash only
-make build - build only
 ```
 
 ### Debug with VSCode (Cortex debug plugin)
 All debugger congigurations you can find in `.vscode/launch.json`
-
-**For debugging, you need `set DEBUG=yes` in Makefile, to compile with -ggdb option** - TODO
 
 **You also need .SVD file to you microcontroller , to show debug information about all registers.**
 

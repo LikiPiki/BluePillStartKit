@@ -1,6 +1,5 @@
-build
+build/*
+!build/.gitkeep
 .vscode/*
 !.vscode/launch.json
 .DS_Store
-*.c
-!src/*.c
