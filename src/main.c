@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <strings.h>
+#include <stdio.h>
 
 #include "../inc/stm32f103xb.h"
 
@@ -14,13 +15,16 @@ uint8_t i2c_k[4] = {'k' & 0xF0 | 0xD, 'k' & 0xF0 | 0x9, ('k' & 0xF) << 4 | 0xD, 
 const uint32_t fastDelay = 1e5;
 const uint32_t slowDelay = 1e6;
 
+const uint8_t HTU_ADDR = 0x40;
+uint8_t dhtData[3] = {0, 0, 0};
+
 uint32_t temp0 = 0;
 uint32_t temp1 = 0;
 
 uint32_t time = slowDelay;
 
 char menu[2][16] = {
-	"Temp: \0",
+	"Temp: %2.d\0",
 	"THT: \0",
 };
 
@@ -54,11 +58,11 @@ void initADC() {
 	RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
     RCC->APB2ENR |= RCC_APB2ENR_IOPAEN;
 
-	GPIOB->CRL &= ~GPIO_CRL_MODE0;
-	GPIOB->CRL &= ~GPIO_CRL_CNF0;
+	GPIOA->CRL &= ~GPIO_CRL_MODE0;
+	GPIOA->CRL &= ~GPIO_CRL_CNF0;
 
-	GPIOB->CRL &= ~GPIO_CRL_MODE1;
-	GPIOB->CRL &= ~GPIO_CRL_CNF1;
+	GPIOA->CRL &= ~GPIO_CRL_MODE1;
+	GPIOA->CRL &= ~GPIO_CRL_CNF1;
 
 	ADC1->CR1 |= ADC_CR1_SCAN;
 	// enabel intrupt on end ADC convertion
@@ -138,19 +142,26 @@ int main() {
 	initRCC();
 	while(!(RCC->CFGR & RCC_CFGR_SWS_PLL));
 	initLED();
-	// initADC();
+	initADC();
+	buttonSetup();
+
+	// start adc
+	ADC1->CR2 |= ADC_CR2_JSWSTART;
+
 	I2Cinit();
+	I2Cread(HTU_ADDR, 0xE3, dhtData, 3);
+	uint16_t temp = dhtData[0] << 8 | dhtData[1];
+	temp = (0.002681 * temp - 46.85);
+
 	LCDinit();
 	LCDclear();
 	delay();
+	sprintf(menu[0], "Temp: %2.d\0", temp);
+	sprintf(menu[1], "H1:%3.d  H2:%3.d", temp0, temp1);
 	LCDprint(menu[0], lineLength(menu[0]));
 	delay();
 	LCDchangeLine(1);
 	LCDprint(menu[1], lineLength(menu[1]));
-	buttonSetup();
-
-	// start adc
-	// ADC1->CR2 |= ADC_CR2_JSWSTART;
 
 	while (TRUE) {
 
