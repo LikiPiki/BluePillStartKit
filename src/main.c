@@ -23,6 +23,16 @@ uint32_t temp0 = 0;
 uint32_t temp1 = 0;
 
 uint32_t time = slowDelay;
+uint8_t someBytes[] = {'h', 'e', 'l', 'l', 'o'};
+
+typedef struct {
+	uint8_t displaySleepCounter;
+	uint8_t displaySleepTime;
+	uint8_t displaySleep;
+} displayLightController;
+
+const uint8_t TO_SLEEP_TIME = 2; // display sleeping time in minutes
+displayLightController dispController = {0, TO_SLEEP_TIME, 0};
 
 char menu[2][16] = {
 	"Temp: %2.d\0",
@@ -90,8 +100,8 @@ void initADC() {
 }
 
 void ADC1_2_IRQHandler() {
-	temp0 = ADC1->JDR1;
-	temp1 = ADC1->JDR2;
+	temp0 = ((float)(4095 - ADC1->JDR1) / 4095) * 100;
+	temp1 = ((float)(4095 - ADC1->JDR2) / 4095) * 100;
 	ADC1->SR &= ~ADC_SR_JEOC;
 }
 
@@ -101,6 +111,11 @@ void delay() {
 
 // Buttons interrupt
 void EXTI15_10_IRQHandler() {
+	// displaySleepCounter = 0;
+	// if (displaySleep) {
+	LCDChangeLight(STATE_ON);
+		// displaySleep = 0;
+	// }
 	GPIOB->ODR ^= GPIO_ODR_ODR0;
 	EXTI->PR |= EXTI_PR_PR15;
 }
@@ -140,18 +155,23 @@ void initTimer() {
 }
 
 void TIM2_IRQHandler() {
-	// GPIOC->ODR ^= GPIO_ODR_ODR13;
+	dispController.displaySleepCounter++;
+	if ((dispController.displaySleepCounter >= dispController.displaySleepTime) && (!dispController.displaySleep)) {
+		LCDChangeLight(LCD_STATE_OFF);
+		dispController.displaySleepCounter = 0;
+		dispController.displaySleep = 1;
+	}
+	GPIOB->ODR ^= GPIO_ODR_ODR0;
 	I2Cread(HTU_ADDR, 0xE3, dhtData, 3);
 	uint16_t temp = dhtData[0] << 8 | dhtData[1];
 	temp = (0.002681 * temp - 46.85);
 	LCDclear();
 	delay();
 	sprintf(menu[0], "Temp: %2.d\0", temp);
-	sprintf(menu[1], "H1:%3.d  H2:%3.d", temp0, temp1);
+	sprintf(menu[1], "H1:%3.d%%  H2:%3.d%%", temp0, temp1);
 	LCDprint(menu[0], lineLength(menu[0]));
 	LCDchangeLine(1);
 	LCDprint(menu[1], lineLength(menu[1]));
-
 	TIM2->SR &= ~TIM_SR_UIF;
 }
 
@@ -174,25 +194,56 @@ void initUsart() {
 
 	// USART 9600 boud rate
 	USART3->BRR |= (156 << 4) | 4;
+
+	// DMA enable
+	USART3->CR3 |= USART_CR3_DMAT;
 	USART3->CR1 |= USART_CR1_UE | USART_CR1_TE | USART_CR1_RE;
-	for (uint8_t i = 0; i < 3; i++) {
-		while (!(USART3->SR & USART_SR_TXE));
-		USART3->DR = i;
-	}
+	// for (uint8_t i = 0; i < 3; i++) {
+	// 	while (!(USART3->SR & USART_SR_TXE));
+	// 	USART3->DR = i;
+	// }
+}
+
+void DMA1_Channel2_IRQHandler() {
+	led2SetState(STATE_ON);
+	DMA1->IFCR |= DMA_IFCR_CGIF2;
+}
+
+void initDMA() {
+	RCC->AHBENR |= RCC_AHBENR_DMA1EN;
+	// middle priority level
+	DMA1_Channel2->CCR |= DMA_CCR_PL_0;
+	// from peripherial to memory
+	DMA1_Channel2->CCR |= DMA_CCR_DIR;
+	DMA1_Channel2->CCR |= DMA_CCR_MINC;
+
+	DMA1_Channel2->CMAR = someBytes;
+	DMA1_Channel2->CPAR = &USART3->DR;
+
+	DMA1_Channel2->CNDTR = 5;
+
+	NVIC_EnableIRQ(DMA1_Channel2_IRQn);
+	// enable trasfer complete interupt
+	DMA1_Channel2->CCR |= DMA_CCR_TCIE;
+
+	DMA1_Channel2->CCR |= DMA_CCR_EN;
+	USART3->SR &= ~USART_SR_TC;
 }
 
 int main() {
 	RCC->APB2ENR |= RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPBEN | RCC_APB2ENR_IOPCEN;
 
-	initTimer();
-	delay(); // for display
 	initRCC();
 	while(!(RCC->CFGR & RCC_CFGR_SWS_PLL));
+
+	initTimer();
+	delay(); // for display
 	gpioInit();
 	initADC();
 	buttonSetup();
 
 	initUsart();
+	initDMA();
 
 	// start adc
 	ADC1->CR2 |= ADC_CR2_JSWSTART;
@@ -206,20 +257,12 @@ int main() {
 	LCDclear();
 	delay();
 	sprintf(menu[0], "Temp: %2.d\0", temp);
-	sprintf(menu[1], "H1:%3.d  H2:%3.d", temp0, temp1);
+	sprintf(menu[1], "H1:%3.d%%  H2:%3.d%%", temp0, temp1);
 	LCDprint(menu[0], lineLength(menu[0]));
-	delay();
 	LCDchangeLine(1);
 	LCDprint(menu[1], lineLength(menu[1]));
 
 	while (TRUE) {
-		GPIOB->ODR |= GPIO_ODR_ODR0;
-		GPIOA->ODR |= GPIO_ODR_ODR8;
-		led2SetState(STATE_ON);
-		delay();
-		GPIOB->ODR &= ~GPIO_ODR_ODR0;
-		GPIOA->ODR &= ~GPIO_ODR_ODR12;
-		led2SetState(STATE_OFF);
  		delay();
 	}
 

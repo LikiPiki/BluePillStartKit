@@ -28,19 +28,11 @@ void gpioInit() {
 
 }
 
-void mosfet1SetState(uint8_t state) {
+void mosfetSetState(pin p, uint8_t state) {
     if (state) {
-        GPIOA->ODR |= GPIO_ODR_ODR8;
+        GPIOA->ODR |= 1 << p;
     } else {
-		GPIOA->ODR &= ~GPIO_ODR_ODR8;
-    }
-}
-
-void mosfet2SetState(uint8_t state) {
-    if (state) {
-        GPIOA->ODR |= GPIO_ODR_ODR9;
-    } else {
-		GPIOA->ODR &= ~GPIO_ODR_ODR9;
+		GPIOA->ODR &= ~(1 << p);
     }
 }
 

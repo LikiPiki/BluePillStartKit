@@ -5,9 +5,13 @@
 #define STATE_ON 1
 #define STATE_OFF 0
 
+typedef enum {
+    PIN8 = 8,
+    PIN9,
+} pin;
+
 void gpioInit();
 
-void mosfet1SetState(uint8_t state);
-void mosfet2SetState(uint8_t state);
+void mosfetSetState(pin p, uint8_t state);
 void led2SetState(uint8_t state);
 void led3SetState(uint8_t state);
