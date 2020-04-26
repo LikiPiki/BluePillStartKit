@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <strings.h>
 #include <stdio.h>
+#include <stdbool.h>
 
 #include "../inc/stm32f103xb.h"
 
@@ -10,6 +11,8 @@
 
 #define TRUE 1
 #define FALSE 0
+
+#define RECIEVE_BYTES_LEN 3
 
 uint8_t i2c_k[4] = {'k' & 0xF0 | 0xD, 'k' & 0xF0 | 0x9, ('k' & 0xF) << 4 | 0xD, ('k' & 0xF) << 4 | 0x9};
 
@@ -23,21 +26,29 @@ uint32_t temp0 = 0;
 uint32_t temp1 = 0;
 
 uint32_t time = slowDelay;
-uint8_t someBytes[] = {'h', 'e', 'l', 'l', 'o'};
+bool startSending = false;
+uint8_t someBytes[] = "T%03d";
+uint8_t recievingBytesUSART3[3];
 
 typedef struct {
-	uint8_t displaySleepCounter;
-	uint8_t displaySleepTime;
-	uint8_t displaySleep;
-} displayLightController;
+	uint8_t first;
+	uint8_t second;
+} ipAdress;
+ipAdress ip = {0, 0};
 
-const uint8_t TO_SLEEP_TIME = 2; // display sleeping time in minutes
-displayLightController dispController = {0, TO_SLEEP_TIME, 0};
-
-char menu[2][16] = {
-	"Temp: %2.d\0",
-	"THT: \0",
+#define SLEEPS_CYCLES 3 // Timer counts to off display
+typedef struct {
+	uint8_t lcdLight;
+	uint8_t counter;
+} lcdController;
+volatile lcdController lcd = {
+	1, // Ligth on 1/0 - OFF
+	0, // Counter default state
 };
+
+uint16_t temp;
+
+char menu[2][16];
 
 void initRCC() {
 	// clocking by HSE crystal
@@ -109,13 +120,14 @@ void delay() {
 	for (uint32_t i = 0; i < time; i++);
 }
 
-// Buttons interrupt
+// Button Right interrupt
 void EXTI15_10_IRQHandler() {
-	// displaySleepCounter = 0;
-	// if (displaySleep) {
-	LCDChangeLight(STATE_ON);
-		// displaySleep = 0;
-	// }
+	if (lcd.lcdLight == 0) {
+		lcd.lcdLight = 1;
+		lcd.counter = 0;
+
+		TIM2->EGR |= TIM_EGR_UG;
+	}
 	GPIOB->ODR ^= GPIO_ODR_ODR0;
 	EXTI->PR |= EXTI_PR_PR15;
 }
@@ -146,32 +158,39 @@ void initTimer() {
 	NVIC_EnableIRQ(TIM2_IRQn);
 
 	TIM2->PSC = 23999;
-	TIM2->ARR = 59999; // 1 sec
+	TIM2->ARR = 29999; // 30 seconds
 	TIM2->EGR |= TIM_EGR_UG;
 	TIM2->SR &= ~TIM_SR_UIF;
 	NVIC_EnableIRQ(TIM2_IRQn);
 	TIM2->DIER |= TIM_DIER_UIE;
-	TIM2->CR1 |= TIM_CR1_CEN;
+	TIM2->CR1 |= TIM_CR1_CEN | TIM_CR1_ARPE;
 }
 
 void TIM2_IRQHandler() {
-	dispController.displaySleepCounter++;
-	if ((dispController.displaySleepCounter >= dispController.displaySleepTime) && (!dispController.displaySleep)) {
-		LCDChangeLight(LCD_STATE_OFF);
-		dispController.displaySleepCounter = 0;
-		dispController.displaySleep = 1;
-	}
-	GPIOB->ODR ^= GPIO_ODR_ODR0;
+	// update sensors information
 	I2Cread(HTU_ADDR, 0xE3, dhtData, 3);
-	uint16_t temp = dhtData[0] << 8 | dhtData[1];
+	temp = dhtData[0] << 8 | dhtData[1];
 	temp = (0.002681 * temp - 46.85);
-	LCDclear();
-	delay();
-	sprintf(menu[0], "Temp: %2.d\0", temp);
-	sprintf(menu[1], "H1:%3.d%%  H2:%3.d%%", temp0, temp1);
-	LCDprint(menu[0], lineLength(menu[0]));
-	LCDchangeLine(1);
-	LCDprint(menu[1], lineLength(menu[1]));
+
+	// if need show data in display
+	if (lcd.lcdLight == 1) {
+		GPIOB->ODR ^= GPIO_ODR_ODR0;
+		LCDclear();
+		delay();
+		sprintf(menu[0], "Temp: %2.d IP%d.%d\0", temp, ip.first, ip.second);
+		sprintf(menu[1], "H1:%3.d%%  H2:%3.d%%", temp0, temp1);
+		LCDprint(menu[0], lineLength(menu[0]));
+		LCDchangeLine(1);
+		LCDprint(menu[1], lineLength(menu[1]));
+	}
+
+	if (lcd.counter >= SLEEPS_CYCLES) {
+		lcd.lcdLight = LCD_STATE_OFF;
+		LCDChangeLight(LCD_STATE_OFF);
+	} else {
+		lcd.counter++;
+	}
+
 	TIM2->SR &= ~TIM_SR_UIF;
 }
 
@@ -192,40 +211,95 @@ void initUsart() {
 	// (24 000 000 / 9 600) / 16 = 156,25 => 156 Mantisa
 	// 0.25 * 16 = 4 Fraction
 
-	// USART 9600 boud rate
-	USART3->BRR |= (156 << 4) | 4;
+	// USART 115200 boud rate
+	USART3->BRR |= 208;
 
 	// DMA enable
 	USART3->CR3 |= USART_CR3_DMAT;
+	USART3->CR3 |= USART_CR3_DMAR;
+
 	USART3->CR1 |= USART_CR1_UE | USART_CR1_TE | USART_CR1_RE;
-	// for (uint8_t i = 0; i < 3; i++) {
+	// for (uint8_t i = 0; i < 4; i++) {
 	// 	while (!(USART3->SR & USART_SR_TXE));
 	// 	USART3->DR = i;
 	// }
+
 }
 
 void DMA1_Channel2_IRQHandler() {
-	led2SetState(STATE_ON);
+	DMA1_Channel2->CCR &= ~DMA_CCR_EN;
 	DMA1->IFCR |= DMA_IFCR_CGIF2;
+
+	// Check flags
+
+	//while(!(USART1->SR & USART_SR_TC));
+	//startSending = false;
+}
+
+void DMA1_Channel3_IRQHandler() {
+	DMA1_Channel3->CCR &= ~DMA_CCR_EN;
+	DMA1->IFCR |= DMA_IFCR_CGIF3;
+
+	// handle bytes from uart
+
+	// Recieving GET to post data to server
+	if ((recievingBytesUSART3[0] == 'G') && (recievingBytesUSART3[1] == 'E')) {
+		led2SetState(STATE_ON);
+		static char ar[16];
+		sprintf(ar, "T%03dH%03dh%03dOOOO",temp, temp0, temp1);
+		sendUsart(ar, 16);
+	}
+
+	// ESP8266 sending server IP address
+	if ((recievingBytesUSART3[0] == 'I')) {
+		ip.first = recievingBytesUSART3[1];
+		ip.second = recievingBytesUSART3[2];
+
+		TIM2->EGR |= TIM_EGR_UG;
+	}
+
+	DMA1_Channel3->CMAR = (uintptr_t) recievingBytesUSART3;
+	DMA1_Channel3->CNDTR = RECIEVE_BYTES_LEN;
+
+	DMA1_Channel3->CCR |= DMA_CCR_EN;
 }
 
 void initDMA() {
 	RCC->AHBENR |= RCC_AHBENR_DMA1EN;
+	// Settings for transiever
 	// middle priority level
 	DMA1_Channel2->CCR |= DMA_CCR_PL_0;
+
 	// from peripherial to memory
 	DMA1_Channel2->CCR |= DMA_CCR_DIR;
 	DMA1_Channel2->CCR |= DMA_CCR_MINC;
 
-	DMA1_Channel2->CMAR = someBytes;
 	DMA1_Channel2->CPAR = &USART3->DR;
-
-	DMA1_Channel2->CNDTR = 5;
 
 	NVIC_EnableIRQ(DMA1_Channel2_IRQn);
 	// enable trasfer complete interupt
 	DMA1_Channel2->CCR |= DMA_CCR_TCIE;
 
+	// Settings for reciever
+
+	// from memory to peripherial
+	DMA1_Channel3->CCR |= DMA_CCR_MINC;
+
+	DMA1_Channel3->CPAR = &USART3->DR;
+
+	// enable trasfer complete interupt
+	DMA1_Channel3->CCR |= DMA_CCR_TCIE;
+
+	DMA1_Channel3->CMAR = (uintptr_t) recievingBytesUSART3;
+	DMA1_Channel3->CNDTR = RECIEVE_BYTES_LEN;
+
+	DMA1_Channel3->CCR |= DMA_CCR_EN;
+	NVIC_EnableIRQ(DMA1_Channel3_IRQn);
+}
+
+void sendUsart(uint8_t* array, uint8_t len) {
+	DMA1_Channel2->CMAR = (uintptr_t) array;
+	DMA1_Channel2->CNDTR = len;
 	DMA1_Channel2->CCR |= DMA_CCR_EN;
 	USART3->SR &= ~USART_SR_TC;
 }
@@ -250,13 +324,13 @@ int main() {
 
 	I2Cinit();
 	I2Cread(HTU_ADDR, 0xE3, dhtData, 3);
-	uint16_t temp = dhtData[0] << 8 | dhtData[1];
+	temp = dhtData[0] << 8 | dhtData[1];
 	temp = (0.002681 * temp - 46.85);
 
 	LCDinit();
 	LCDclear();
 	delay();
-	sprintf(menu[0], "Temp: %2.d\0", temp);
+	sprintf(menu[0], "Temp: %2.d IP%d.%d\0", temp, ip.first, ip.second);
 	sprintf(menu[1], "H1:%3.d%%  H2:%3.d%%", temp0, temp1);
 	LCDprint(menu[0], lineLength(menu[0]));
 	LCDchangeLine(1);

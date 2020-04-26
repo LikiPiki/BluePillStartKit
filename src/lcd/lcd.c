@@ -24,10 +24,10 @@ void LCDclear() {
 
 void LCDChangeLight(uint8_t lcdLightStatus) {
     if (lcdLightStatus) {
-        lcdSendCommand(0b00001101);
+        lcdSendCommand(0b00000001);
     } else {
         static uint8_t command_bytes[4];
-        uint8_t command = 0b00001001;
+        uint8_t command = 0b00000001;
         command_bytes[0] = (command & 0xF0) | 0x04;
         command_bytes[1] = (command & 0xF0) | 0x00;
         command_bytes[2] = ((command & 0x0F) << 4) | 0x04;
