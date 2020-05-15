@@ -22,13 +22,26 @@ const uint32_t slowDelay = 1e6;
 const uint8_t HTU_ADDR = 0x40;
 uint8_t dhtData[3] = {0, 0, 0};
 
-uint32_t temp0 = 0;
-uint32_t temp1 = 0;
-
 uint32_t time = slowDelay;
 bool startSending = false;
 uint8_t someBytes[] = "T%03d";
 uint8_t recievingBytesUSART3[3];
+
+typedef struct {
+	// Temperature
+	uint16_t temp;
+	uint8_t tempFrac;
+	// Humidity 
+	uint16_t h;
+	uint8_t hFrac;
+
+	uint8_t h0;
+	uint8_t h0Frac;
+
+	uint8_t h1;
+	uint8_t h1Frac;
+} sensors; 
+sensors sens;
 
 typedef struct {
 	uint8_t first;
@@ -45,8 +58,6 @@ volatile lcdController lcd = {
 	1, // Ligth on 1/0 - OFF
 	0, // Counter default state
 };
-
-uint16_t temp;
 
 char menu[2][16];
 
@@ -97,6 +108,7 @@ void initADC() {
 	ADC1->JSQR |= ADC_JSQR_JSQ4_0;
 
 	NVIC_EnableIRQ(ADC1_2_IRQn);
+	NVIC_SetPriority(ADC1_2_IRQn, 0xE0);
 
 	// on ADC
 	ADC1->CR2 |= ADC_CR2_ADON;
@@ -111,8 +123,11 @@ void initADC() {
 }
 
 void ADC1_2_IRQHandler() {
-	temp0 = ((float)(4095 - ADC1->JDR1) / 4095) * 100;
-	temp1 = ((float)(4095 - ADC1->JDR2) / 4095) * 100;
+	sens.h0 = ((float)(4095 - ADC1->JDR1) / 4095) * 100;
+	sens.h0Frac = (int) (((float)(4095 - ADC1->JDR1) / 4095) * 10000) % 100;
+	sens.h1 = ((float)(4095 - ADC1->JDR2) / 4095) * 100;
+	sens.h1Frac = (int) (((float)(4095 - ADC1->JDR2) / 4095) * 10000) % 100;
+
 	ADC1->SR &= ~ADC_SR_JEOC;
 }
 
@@ -150,12 +165,14 @@ void buttonSetup() {
 	EXTI->IMR |= EXTI_IMR_MR15;
 
 	NVIC_EnableIRQ(EXTI15_10_IRQn);
+	NVIC_SetPriority(EXTI15_10_IRQn, 0xE0);
 }
 
 void initTimer() {
 	RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
 
 	NVIC_EnableIRQ(TIM2_IRQn);
+	NVIC_SetPriority(TIM2_IRQn, 0xF0);
 
 	TIM2->PSC = 23999;
 	TIM2->ARR = 29999; // 30 seconds
@@ -167,18 +184,29 @@ void initTimer() {
 }
 
 void TIM2_IRQHandler() {
+	ADC1->CR2 |= ADC_CR2_JSWSTART;
 	// update sensors information
 	I2Cread(HTU_ADDR, 0xE3, dhtData, 3);
-	temp = dhtData[0] << 8 | dhtData[1];
-	temp = (0.002681 * temp - 46.85);
+	sens.temp = dhtData[0] << 8 | dhtData[1];
+	sens.tempFrac = (int) (0.2681 * sens.temp - 46.85) % 100;
+	sens.temp = (0.002681 * sens.temp - 46.85);
+
+	I2Cread(HTU_ADDR, 0xE5, dhtData, 3);
+	sens.h = dhtData[0] << 8 | dhtData[1];
+	sens.hFrac = (int) (0.1907 * sens.h - 6) % 100;
+	sens.h = (0.001907 * sens.h - 6);
+	if (sens.h > 100) {
+		sens.h = 100;
+		sens.hFrac = 0;
+	}
 
 	// if need show data in display
 	if (lcd.lcdLight == 1) {
 		GPIOB->ODR ^= GPIO_ODR_ODR0;
 		LCDclear();
 		delay();
-		sprintf(menu[0], "Temp: %2.d IP%d.%d\0", temp, ip.first, ip.second);
-		sprintf(menu[1], "H1:%3.d%%  H2:%3.d%%", temp0, temp1);
+		sprintf(menu[0], "Temp: %2.d IP%d.%d\0", sens.temp, ip.first, ip.second);
+		sprintf(menu[1], "H1:%3.d%%  H2:%3.d%%", sens.h0,  sens.h1);
 		LCDprint(menu[0], lineLength(menu[0]));
 		LCDchangeLine(1);
 		LCDprint(menu[1], lineLength(menu[1]));
@@ -245,9 +273,18 @@ void DMA1_Channel3_IRQHandler() {
 	// Recieving GET to post data to server
 	if ((recievingBytesUSART3[0] == 'G') && (recievingBytesUSART3[1] == 'E')) {
 		led2SetState(STATE_ON);
-		static char ar[16];
-		sprintf(ar, "T%03dH%03dh%03dOOOO",temp, temp0, temp1);
-		sendUsart(ar, 16);
+		static char ar[100];
+		sprintf(ar, "T%03d%02dH%03d%02dh%03d%02dV%03d%02dOOOOOO",
+			sens.temp,
+			sens.tempFrac,
+			sens.h0,
+			sens.h0Frac,
+			sens.h1,
+			sens.h1Frac,
+			sens.h,
+			sens.hFrac
+		);
+		sendUsart(ar, 30);
 	}
 
 	// ESP8266 sending server IP address
@@ -314,27 +351,21 @@ int main() {
 	delay(); // for display
 	gpioInit();
 	initADC();
+	ADC1->CR2 |= ADC_CR2_JSWSTART;
 	buttonSetup();
 
 	initUsart();
 	initDMA();
 
 	// start adc
-	ADC1->CR2 |= ADC_CR2_JSWSTART;
 
 	I2Cinit();
-	I2Cread(HTU_ADDR, 0xE3, dhtData, 3);
-	temp = dhtData[0] << 8 | dhtData[1];
-	temp = (0.002681 * temp - 46.85);
-
 	LCDinit();
-	LCDclear();
-	delay();
-	sprintf(menu[0], "Temp: %2.d IP%d.%d\0", temp, ip.first, ip.second);
-	sprintf(menu[1], "H1:%3.d%%  H2:%3.d%%", temp0, temp1);
-	LCDprint(menu[0], lineLength(menu[0]));
-	LCDchangeLine(1);
-	LCDprint(menu[1], lineLength(menu[1]));
+ 	LCDclear();
+ 	delay();
+
+	// Update screen and sensors
+	TIM2->EGR |= TIM_EGR_UG;
 
 	while (TRUE) {
  		delay();
